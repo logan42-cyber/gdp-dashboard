@@ -1,151 +1,79 @@
+# app.py
+# DISCLAIMER: Educational purposes only — not financial advice.
+# Uses Yahoo Finance for live data.
+
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import yfinance as yf
+from datetime import datetime, timedelta
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(page_title="1-Week Stock Screener", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+st.title("📈 1-Week Stock Screener (Under $50)")
+st.caption("Educational tool — not financial advice. Uses Yahoo Finance data.")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# --- User Inputs ---
+capital = st.number_input("💰 Total Capital ($)", min_value=100, value=1000, step=100)
+num_positions = st.slider("📊 Number of Stocks", 5, 20, 10)
+max_price = st.number_input("💵 Max Stock Price ($)", min_value=1.0, value=50.0, step=1.0)
+min_volume = st.number_input("📈 Min Avg Daily Volume", min_value=100000, value=500000, step=50000)
+run = st.button("🔍 Run Screener")
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# --- Helper Function ---
+@st.cache_data(ttl=3600)
+def fetch_data(tickers):
+    end = datetime.now()
+    start = end - timedelta(days=15)
+    data = yf.download(tickers, start=start, end=end, progress=False, group_by='ticker', threads=True, auto_adjust=True)
+    return data
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def calc_signals(df):
+    df = df.copy()
+    df["Return"] = df["Close"].pct_change()
+    mom_3d = (df["Close"].iloc[-1] - df["Close"].iloc[-4]) / df["Close"].iloc[-4]
+    mom_10d = (df["Close"].iloc[-1] - df["Close"].iloc[-11]) / df["Close"].iloc[-11]
+    vol_10d = df["Return"].tail(10).std()
+    return mom_3d, mom_10d, vol_10d
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# --- Run Screener ---
+if run:
+    with st.spinner("Fetching live data..."):
+        # Small universe for demo
+        tickers = ["AAPL","MSFT","AMD","NVDA","INTC","F","T","SOUN","CHPT","PLUG","NOK","BBAI","U","SNAP","DKNG","PYPL","SOFI","UBER","LYFT","MARA","RIOT"]
+        data = fetch_data(tickers)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    results = []
+    for t in tickers:
+        try:
+            df = data[t]
+            last_close = df["Close"].iloc[-1]
+            avg_vol = df["Volume"].tail(10).mean()
+            if last_close <= max_price and avg_vol >= min_volume:
+                m3, m10, vol = calc_signals(df)
+                score = 0.5*m3 + 0.3*m10 - 0.2*vol  # composite score
+                results.append([t, last_close, avg_vol, m3, m10, vol, score])
+        except Exception:
+            continue
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    if not results:
+        st.error("No stocks matched your filters. Try lowering volume or raising max price.")
+    else:
+        df_results = pd.DataFrame(results, columns=["Ticker","Price","AvgVol","Mom3D","Mom10D","Vol10D","Score"])
+        df_results.sort_values("Score", ascending=False, inplace=True)
+        top = df_results.head(num_positions).copy()
 
-    return gdp_df
+        st.subheader("🏆 Top Candidates")
+        st.dataframe(top.style.format({"Price":"${:.2f}","AvgVol":"{:.0f}","Mom3D":"{:.2%}","Mom10D":"{:.2%}","Vol10D":"{:.2%}","Score":"{:.4f}"}))
 
-gdp_df = get_gdp_data()
+        st.subheader("📦 Suggested Allocation")
+        per_slot = capital / num_positions
+        top["Shares"] = (per_slot // top["Price"]).astype(int)
+        top["Cost"] = top["Shares"] * top["Price"]
+        st.dataframe(top[["Ticker","Price","Shares","Cost"]].style.format({"Price":"${:.2f}","Cost":"${:.2f}"}))
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+        total_invested = top["Cost"].sum()
+        st.metric("Total Invested", f"${total_invested:,.2f}")
+        st.success("✅ Screener complete! Data refreshes every hour.")
+else:
+    st.info("Adjust your settings and click **Run Screener** to begin.")
